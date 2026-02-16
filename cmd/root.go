@@ -3,7 +3,9 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
+	"github.com/kushalpatel/bro-cli/internal/config"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -45,4 +47,26 @@ func initConfig() {
 			fmt.Fprintln(os.Stderr, "Error reading config:", err)
 		}
 	}
+}
+
+// ensureSetup checks if config exists and runs setup wizard on first run.
+func ensureSetup(cfg *config.Config) error {
+	configDir, err := config.Dir()
+	if err != nil {
+		return err
+	}
+
+	configPath := filepath.Join(configDir, "config.yaml")
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		// No config file — check if API key is available via env
+		if os.Getenv("BRO_ANTHROPIC_API_KEY") != "" || os.Getenv("BRO_OPENAI_API_KEY") != "" {
+			return nil
+		}
+
+		fmt.Println("No configuration found. Starting setup wizard...")
+		fmt.Println()
+		return runSetupWizard()
+	}
+
+	return nil
 }
