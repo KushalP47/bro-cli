@@ -1,0 +1,396 @@
+# `bro` — Developer Productivity CLI
+
+## Overview
+
+`k` is a personal developer productivity CLI built in Go that reduces daily friction around commit messages, repetitive terminal commands, standup summaries, and general AI-assisted problem solving. It's designed to be opinionated for personal use but configurable enough for public distribution.
+
+---
+
+## V1 Scope
+
+### Commands
+
+| Command | Purpose |
+|---|---|
+| `bro commit` | Generate smart commit messages from staged changes |
+| `bro run` | Fuzzy-searchable command shortcuts with direct alias support |
+| `bro standup` | Generate daily standup summary from git activity, output to markdown |
+| `bro ask` | General-purpose LLM queries with stdin/pipe support |
+| `bro config` | Manage configuration (profiles, API keys, shortcuts) |
+
+---
+
+## Feature Specs
+
+### 1. `bro commit` — Smart Commit Messages
+
+**Flow:**
+
+```
+$ bro commit
+
+  Analyzing staged changes...
+
+  Proposed: ZP-12345 #comment Updated environment variables for staging deployment
+
+  [enter] accept  [e] edit in $EDITOR  [r] regenerate  [q] quit
+```
+
+**How it works:**
+
+1. Runs `git diff --staged` to get the diff
+2. Detects which profile to use based on current working directory
+3. If branch name matches the configured `branch_pattern`, extracts ticket/project info automatically
+4. Sends diff + profile instructions to the configured LLM provider
+5. Presents the generated message in an interactive prompt
+6. On accept, runs `git commit -m "<message>"`
+
+**Profile system:**
+
+- **Org profile**: Uses a custom commit template with placeholders like `{project}-{ticket} #comment {message}`. Parses branch names (e.g., `ZP-12345-fix-env-vars`) to auto-fill ticket info.
+- **Personal profile**: Uses conventional commit format (`feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`). The LLM determines the appropriate prefix based on the diff.
+- Profiles are matched to directories via glob patterns in config.
+
+**Edge cases:**
+
+- No staged changes → show error, suggest `git add`
+- Branch name doesn't match pattern → prompt user for ticket ID
+- LLM API unavailable → fall back to template-only mode (fill placeholders manually)
+- Large diffs → truncate to fit within LLM context window, prioritize file names + key changes
+
+---
+
+### 2. `bro run` — Command Shortcuts
+
+**Two modes of invocation:**
+
+```
+# Mode 1: Fuzzy search (interactive)
+$ bro run
+┌──────────────────────────────────────┐
+│ > _                                  │
+│   connect-db-staging    Connect to staging postgres    │
+│   connect-db-prod       Connect to prod postgres       │
+│   gcp-auth              Auth to GCP project            │
+│   k8s-staging           Switch to staging k8s context  │
+│   docker-clean          Prune all docker resources     │
+└──────────────────────────────────────┘
+# Arrow keys to navigate, enter to execute, type to filter
+
+# Mode 2: Direct alias
+$ bro run gcp-auth
+$ bro run connect-db --preset staging
+```
+
+**How it works:**
+
+1. Loads shortcuts from both global config (`~/.bro/commands.yaml`) and project-level config (`.bro.yaml` in repo root)
+2. Project-level commands take precedence and appear first in the list
+3. In interactive mode, presents a scrollable/filterable list using arrow keys
+4. On selection, executes the command in the user's current shell context
+5. Supports parameterized commands with `{{placeholder}}` syntax — prompts for values at runtime or uses configured defaults/presets
+
+**Shortcut definition:**
+
+```yaml
+shortcuts:
+  connect-db:
+    description: "Connect to postgres database"
+    command: "psql -h {{host}} -U {{user}} -d {{db}}"
+    defaults:
+      user: "dev"
+      db: "app"
+    presets:
+      staging:
+        host: "staging.db.internal"
+      prod:
+        host: "prod.db.internal"
+        user: "readonly"
+
+  gcp-auth:
+    description: "Authenticate to GCP project"
+    command: "gcloud auth login && gcloud config set project {{project_id}}"
+    defaults:
+      project_id: "my-project-123"
+
+  docker-clean:
+    description: "Prune all Docker resources"
+    command: "docker system prune -af && docker volume prune -f"
+```
+
+---
+
+### 3. `bro standup` — Daily Summary Generator
+
+**Flow:**
+
+```
+$ bro standup
+
+  Scanning git activity since yesterday...
+
+  Found activity in 3 repos:
+    - ~/work/backend (8 commits)
+    - ~/work/frontend (3 commits)
+    - ~/personal/bro-cli (2 commits)
+
+  Generating summary...
+
+  ✓ Summary saved to ~/.bro/standups/2026-02-13.md
+
+  Preview:
+  ────────────────────────────────
+  ## Daily Standup — February 13, 2026
+
+  ### work/backend
+  - Implemented retry logic for payment webhook processing
+  - Fixed race condition in concurrent order updates
+  - Updated staging environment variables
+
+  ### work/frontend
+  - Added loading skeleton to dashboard page
+  - Fixed responsive layout on mobile nav
+
+  ### personal/bro-cli
+  - Set up cobra CLI scaffolding
+  - Added initial commit message generation
+  ────────────────────────────────
+```
+
+**How it works:**
+
+1. Scans all configured repo directories for git activity since last working day (configurable, defaults to yesterday; skips weekends if today is Monday)
+2. Collects `git log --since=<date> --author=<user>` for each repo
+3. Optionally collects `git diff --stat` for more context on what changed
+4. Sends the aggregated log to the LLM with instructions to produce a concise standup summary
+5. Saves the output as a markdown file in `~/.bro/standups/YYYY-MM-DD.md`
+6. Prints a preview to the terminal
+
+**Configuration:**
+
+```yaml
+standup:
+  repos:
+    - ~/work/backend
+    - ~/work/frontend
+    - ~/personal/*          # glob support
+  author: "Your Name"       # git author to filter by
+  output_dir: ~/.bro/standups
+  lookback: "auto"          # "auto" = last working day, or "24h", "2d" etc.
+```
+
+**Future (V2+):** Integrations to push the markdown to Apple Notes, Notion, Google Docs, etc.
+
+---
+
+### 4. `bro ask` — AI-Assisted Problem Solving
+
+**Usage:**
+
+```bash
+# Direct question
+$ bro ask "how do I undo the last git commit but keep the changes"
+
+# Pipe in context
+$ cat error.log | k ask "why is this failing"
+
+# File as context
+$ bro ask -f main.go "explain what this function does"
+
+# Combine
+$ kubectl logs pod/api-server | k ask "find any errors related to database connections"
+```
+
+**How it works:**
+
+1. Accepts a question as a positional argument
+2. Reads stdin if piped (adds it as context to the prompt)
+3. Optional `-f` flag to read a file as context
+4. Sends everything to the configured LLM
+5. Streams the response to the terminal (supports streaming for both Anthropic and OpenAI APIs)
+6. Respects profile-level system prompts if configured (e.g., "you are helping a backend Go developer")
+
+---
+
+## Configuration
+
+### File Locations
+
+```
+~/.bro/
+├── config.yaml           # Main configuration
+├── commands.yaml          # Global command shortcuts
+├── standups/              # Generated standup summaries
+│   ├── 2026-02-13.md
+│   └── 2026-02-14.md
+└── templates/             # Custom commit message templates (if any)
+```
+
+Per-project config: `.bro.yaml` at the repo root (optional, for project-specific shortcuts and profile overrides).
+
+### Main Config (`~/.bro/config.yaml`)
+
+```yaml
+# LLM Configuration
+llm:
+  provider: "anthropic"       # "anthropic" | "openai"
+  anthropic:
+    api_key: "sk-ant-..."     # or set via BRO_ANTHROPIC_API_KEY env var
+    model: "claude-sonnet-4-20250514"
+  openai:
+    api_key: "sk-..."         # or set via BRO_OPENAI_API_KEY env var
+    model: "gpt-4o"
+
+# Commit Profiles
+profiles:
+  org:
+    commit_template: "{project}-{ticket} #comment {message}"
+    branch_pattern: "^(?P<project>[A-Z]+)-(?P<ticket>\\d+)"
+    llm_instructions: "Keep commit messages concise, imperative mood, under 72 chars"
+  personal:
+    commit_style: "conventional"
+    llm_instructions: "Use conventional commit format. Determine the type from the diff."
+
+# Directory → Profile mapping
+projects:
+  "~/work/*": "org"
+  "~/personal/*": "personal"
+
+# Standup Configuration
+standup:
+  repos:
+    - ~/work/backend
+    - ~/work/frontend
+    - ~/personal/*
+  author: "Your Name"
+  output_dir: "~/.bro/standups"
+  lookback: "auto"
+
+# General
+editor: ""                 # defaults to $EDITOR
+```
+
+### Setup Wizard
+
+First-time run (`k` with no args or `k init`) launches an interactive setup:
+
+1. Choose LLM provider
+2. Enter API key (stored in config, with recommendation to use env var instead)
+3. Set up a default profile
+4. Optionally configure standup repos
+
+---
+
+## Tech Stack
+
+| Component | Choice | Reason |
+|---|---|---|
+| Language | Go | Fast, single binary, cross-platform |
+| CLI framework | [cobra](https://github.com/spf13/cobra) | Industry standard for Go CLIs |
+| Config management | [viper](https://github.com/spf13/viper) | Works seamlessly with cobra, supports YAML |
+| Interactive prompts | [bubbletea](https://github.com/charmbracelet/bubbletea) | Terminal UI framework for the fuzzy picker, interactive commit flow |
+| Fuzzy filtering | [go-fuzzyfinder](https://github.com/ktr0731/go-fuzzyfinder) or bubbletea custom | For `bro run` list |
+| Styling/colors | [lipgloss](https://github.com/charmbracelet/lipgloss) | Pretty terminal output, pairs with bubbletea |
+| LLM clients | `net/http` or official SDKs | Direct HTTP keeps dependencies light |
+| Git operations | `os/exec` calling git | Simpler and more reliable than go-git for our use case |
+| Distribution | `go install` + Homebrew tap | Free, standard Go distribution |
+
+---
+
+## Project Structure
+
+```
+k/
+├── cmd/                    # Cobra command definitions
+│   ├── root.go             # Root command, setup wizard
+│   ├── commit.go           # k commit
+│   ├── run.go              # k run
+│   ├── standup.go          # k standup
+│   ├── ask.go              # k ask
+│   └── config.go           # k config
+├── internal/
+│   ├── llm/                # LLM provider abstraction
+│   │   ├── provider.go     # Interface definition
+│   │   ├── anthropic.go    # Anthropic implementation
+│   │   └── openai.go       # OpenAI implementation
+│   ├── git/                # Git operations
+│   │   ├── diff.go         # Staged diff reading
+│   │   ├── log.go          # Commit log parsing
+│   │   └── branch.go       # Branch name parsing
+│   ├── config/             # Configuration loading & profiles
+│   │   ├── config.go       # Config struct & loading
+│   │   └── profile.go      # Profile matching logic
+│   ├── runner/             # Command shortcut execution
+│   │   ├── shortcuts.go    # Shortcut loading & resolution
+│   │   └── executor.go     # Command execution
+│   ├── standup/            # Standup generation
+│   │   └── generator.go    # Activity collection & summary
+│   └── ui/                 # Terminal UI components
+│       ├── picker.go       # Fuzzy search picker (for k run)
+│       ├── commit_flow.go  # Interactive commit prompt
+│       └── styles.go       # Shared lipgloss styles
+├── go.mod
+├── go.sum
+├── main.go
+├── Makefile
+└── README.md
+```
+
+---
+
+## Distribution
+
+### `go install`
+
+```bash
+go install github.com/<username>/k@latest
+```
+
+### Homebrew
+
+Create a separate repo `homebrew-bro` with a formula:
+
+```ruby
+class K < Formula
+  desc "Developer productivity CLI — smart commits, command shortcuts, standup summaries"
+  homepage "https://github.com/<username>/k"
+  url "https://github.com/<username>/k/releases/download/v0.1.0/k_0.1.0_darwin_arm64.tar.gz"
+  sha256 "..."
+
+  def install
+    bin.install "bro"
+  end
+end
+```
+
+Install via:
+
+```bash
+brew tap <username>/bro
+brew install bro
+```
+
+Homebrew taps are completely free — just a GitHub repo with the formula file. Use GoReleaser to automate building binaries for each release and updating the formula.
+
+---
+
+## V2+ Roadmap (For Reference)
+
+- **Daemon mode**: `bro daemon start/stop/status` — background activity tracking via launchd
+- **Activity tracking**: Polls git repos, tracks directory time, stores in local SQLite
+- **Auto-summary**: End-of-day automatic standup generation
+- **Export integrations**: Push standups to Apple Notes, Notion, Google Docs
+- **PR description generator**: `bro pr` — generate PR descriptions from branch diff
+- **Snippet manager**: `bro snippet` — save/retrieve frequently used commands and code
+- **Environment switcher**: `bro env staging` — switch GCP project, k8s context, DB in one command
+- **Plugin system**: Allow community extensions
+
+---
+
+## Open Questions / Decisions for Implementation
+
+1. **GitHub repo name**: `bro-cli` (since `bro` alone is too generic for a repo name).
+2. **API key storage**: Config file vs system keychain? Config file is simpler but less secure. Could support both.
+3. **Streaming responses**: For `bro ask`, stream LLM responses token-by-token for better UX? Adds complexity but feels much better.
+4. **Offline fallback for `bro commit`**: When no API key is configured or API is down, should it just open the template with placeholders for manual fill, or skip the message generation entirely?
+5. **Shell completions**: Generate bash/zsh/fish completions via cobra's built-in support? Low effort, high quality-of-life.
